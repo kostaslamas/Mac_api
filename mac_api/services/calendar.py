@@ -8,12 +8,13 @@ occurrences in the requested range are computed from the RRULE.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 from dateutil.rrule import rrulestr
 from pydantic import BaseModel, Field, model_validator
 
+from ..errors import MacAPIError
 from ..runner import run_jxa
 
 
@@ -209,6 +210,17 @@ def expand_recurring(event: dict[str, Any], start: datetime, end: datetime) -> l
             continue
         occurrences.append({**event, "start": occurrence_start.isoformat(), "end": occurrence_end.isoformat()})
     return occurrences
+
+
+def resolve_range(start: datetime | None, end: datetime | None, days: int = 7) -> tuple[datetime, datetime]:
+    """Default to today's midnight + `days`; naive datetimes are local time."""
+    start = (start or datetime.combine(datetime.now().date(), time.min)).astimezone()
+    end = end.astimezone() if end else start + timedelta(days=days)
+    if end <= start:
+        raise MacAPIError(400, "'end' must be after 'start'")
+    if end - start > timedelta(days=366):
+        raise MacAPIError(400, "The range can be at most 366 days")
+    return start, end
 
 
 def list_calendars() -> list[CalendarInfo]:

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
 from ..auth import require_write_access
-from ..errors import MacAPIError
 from ..services import calendar
 from ..services.calendar import CalendarEvent, CalendarInfo, EventCreate, EventList
 
@@ -25,13 +24,7 @@ def get_events(
     days: int = Query(7, ge=1, le=366),
     calendar_name: str | None = Query(None, alias="calendar"),
 ) -> EventList:
-    # Naive datetimes are local time; make everything timezone-aware before comparing.
-    start = (start or datetime.combine(datetime.now().date(), time.min)).astimezone()
-    end = end.astimezone() if end else start + timedelta(days=days)
-    if end <= start:
-        raise MacAPIError(400, "'end' must be after 'start'")
-    if end - start > timedelta(days=366):
-        raise MacAPIError(400, "The range can be at most 366 days")
+    start, end = calendar.resolve_range(start, end, days)
     return calendar.list_events(start, end, calendar_name)
 
 

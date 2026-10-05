@@ -25,6 +25,8 @@ class Settings:
     api_key: str | None = None
     auth_disabled: bool = False
     read_only: bool = False
+    mcp_enabled: bool = True
+    allowed_networks: list[str] = field(default_factory=list)  # empty: no address restriction
     osascript_timeout: float = 60.0
     messages_db: Path = field(default_factory=lambda: Path.home() / "Library" / "Messages" / "chat.db")
     messages_attachments_dir: Path = field(
@@ -41,6 +43,8 @@ class Settings:
             api_key=os.environ.get("MAC_API_KEY") or None,
             auth_disabled=_env_bool("MAC_API_NO_AUTH"),
             read_only=_env_bool("MAC_API_READ_ONLY"),
+            mcp_enabled=not _env_bool("MAC_API_NO_MCP"),
+            allowed_networks=[n for n in os.environ.get("MAC_API_ALLOWED_NETWORKS", "").split(",") if n.strip()],
             osascript_timeout=float(os.environ.get("MAC_API_OSASCRIPT_TIMEOUT", defaults.osascript_timeout)),
             messages_db=_env_path("MAC_API_MESSAGES_DB", defaults.messages_db),
             messages_attachments_dir=_env_path(
@@ -50,9 +54,9 @@ class Settings:
         )
 
 
-def load_or_create_api_key(path: Path = DEFAULT_KEY_FILE) -> tuple[str, bool]:
-    """Return the stored API key, creating one on first use. The bool is True if created."""
-    if path.exists():
+def load_or_create_api_key(path: Path = DEFAULT_KEY_FILE, *, rotate: bool = False) -> tuple[str, bool]:
+    """Return the stored API key, creating one on first use (or when rotating). The bool is True if created."""
+    if path.exists() and not rotate:
         key = path.read_text().strip()
         if key:
             return key, False

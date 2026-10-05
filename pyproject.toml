@@ -1,13 +1,14 @@
 [project]
 name = "mac-api"
 version = "0.1.0"
-description = "A local FastAPI server that exposes macOS services (Reminders, iMessage, Notes, Calendar, Contacts, Shortcuts, system controls) over HTTP."
+description = "A local FastAPI and MCP server that exposes macOS services (Reminders, iMessage, Notes, Calendar, Contacts, Shortcuts, system controls) to scripts and AI assistants."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "python-dateutil>=2.8",
+    "mcp>=2.3,<3",
 ]
 
 [project.scripts]

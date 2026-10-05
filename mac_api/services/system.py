@@ -185,15 +185,18 @@ def open_target(request: OpenRequest) -> None:
     run_command(cmd, timeout=30)
 
 
-def screenshot(display: int | None = None) -> bytes:
+def screenshot(display: int | None = None, image_format: str = "png", max_size: int | None = None) -> bytes:
+    """Capture the screen; `max_size` scales the longest side down to that many pixels."""
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "screenshot.png"
-        cmd = ["screencapture", "-x", "-t", "png"]
+        path = Path(tmp) / f"screenshot.{image_format}"
+        cmd = ["screencapture", "-x", "-t", image_format]
         if display:
             cmd += ["-D", str(display)]
         run_command([*cmd, str(path)], timeout=30)
         if not path.exists():
             raise MacAPIError(500, "screencapture did not produce an image", hint="Grant Screen Recording permission.")
+        if max_size:
+            run_command(["sips", "-Z", str(max_size), str(path)], timeout=30)
         return path.read_bytes()
 
 

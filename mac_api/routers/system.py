@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query, Response, status
 
 from ..auth import require_write_access
@@ -72,11 +74,16 @@ def open_target(data: OpenRequest) -> Response:
 @router.get(
     "/screenshot",
     response_class=Response,
-    responses={200: {"content": {"image/png": {}}}},
+    responses={200: {"content": {"image/png": {}, "image/jpeg": {}}}},
     summary="Take a screenshot (needs Screen Recording permission)",
 )
-def screenshot(display: int | None = Query(None, ge=1, description="Display number; main display by default")) -> Response:
-    return Response(content=system.screenshot(display), media_type="image/png")
+def screenshot(
+    display: int | None = Query(None, ge=1, description="Display number; main display by default"),
+    format: Literal["png", "jpg"] = "png",
+    max_size: int | None = Query(None, ge=200, le=8000, description="Scale the longest side down to this many pixels"),
+) -> Response:
+    media_type = "image/png" if format == "png" else "image/jpeg"
+    return Response(content=system.screenshot(display, format, max_size), media_type=media_type)
 
 
 @router.get("/apps", response_model=list[str], summary="Names of running apps")
