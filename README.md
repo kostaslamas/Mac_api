@@ -1,7 +1,7 @@
 # mac-api
 
 A small FastAPI server that runs on your Mac and exposes macOS services:
-Reminders, iMessage/SMS, Contacts, Notes, Calendar, Shortcuts and system controls.
+Reminders, iMessage/SMS, Telegram, Contacts, Notes, Calendar, Shortcuts, notifications (incoming Viber, WhatsApp, Messenger, ... messages) and system controls.
 It speaks two protocols on the same port, both protected by one token:
 
 - a REST API at `/`, for scripts, your phone and home automation;
@@ -11,6 +11,8 @@ It speaks two protocols on the same port, both protected by one token:
 | --- | --- |
 | **Reminders** | List lists; list/search reminders (or just today's and overdue ones); create with due date and alert; edit, complete, delete |
 | **Messages** | Conversations with contact names and unread counts; read a conversation; search all messages; filter by person, date or unread; download attachments; send to a person or an existing (group) chat |
+| **Telegram** | Your own account through Telegram's official API: chats with unread counts, read, search, send, mark as read. Needs a one-time login, see [Telegram](#telegram). |
+| **Notifications** | Notifications shown on the Mac, filterable by app. This is how incoming **Viber**, WhatsApp, Messenger, Signal or Slack messages reach the API. See [Viber, WhatsApp and other apps](#viber-whatsapp-and-other-apps). |
 | **Contacts** | Search by name (accent-insensitive), phone or email; look up who a number belongs to |
 | **Notes** | Folders; list/search notes; read (HTML and plain text); create; append; delete |
 | **Calendar** | Calendars; events in a range, with recurring events expanded; create and delete events |
@@ -75,7 +77,7 @@ Every MCP request needs `Authorization: Bearer <token>`; without it the server a
 Claude's web connectors (claude.ai) connect from Anthropic's cloud, so they cannot reach a LAN address.
 Use a desktop or terminal client on a computer in your network.
 
-The AI gets 34 tools, such as `reminders_today`, `reminders_create`, `messages_chats`, `messages_read`, `messages_search`, `messages_send`, `contacts_search`, `notes_append`, `calendar_events`, `calendar_create_event`, `shortcuts_run`, `mac_screenshot` and `mac_notify`.
+The AI gets 36 tools (41 with Telegram set up), such as `reminders_today`, `reminders_create`, `messages_chats`, `messages_read`, `messages_send`, `telegram_chats`, `telegram_send`, `notifications_recent`, `contacts_search`, `notes_append`, `calendar_events`, `calendar_create_event`, `shortcuts_run`, `mac_screenshot` and `mac_notify`.
 Tools that only read are marked read-only and tools that delete are marked destructive, so clients can ask you before running them.
 To let an AI look but never act, run with `--read-only`.
 The tools that change anything (sending messages, creating, deleting, running shortcuts, ...) then don't exist at all.
@@ -86,12 +88,63 @@ macOS grants permissions to the app that *launched* mac-api (Terminal, iTerm, ..
 
 | Permission | Needed for | Where |
 | --- | --- | --- |
-| Full Disk Access | Messages (reading), Contacts | System Settings → Privacy & Security → Full Disk Access → add your terminal, then restart it |
+| Full Disk Access | Messages (reading), Contacts, notifications | System Settings → Privacy & Security → Full Disk Access → add your terminal, then restart it |
 | Automation | Reminders, Notes, Calendar, sending Messages, running apps list | macOS asks the first time; or System Settings → Privacy & Security → Automation |
 | Screen Recording | `/system/screenshot` | System Settings → Privacy & Security → Screen & System Audio Recording |
 
 `GET /diagnostics?automation=true` touches each app once, so every Automation prompt appears together.
 It then reports what is still missing.
+
+## Telegram
+
+mac-api uses Telegram's official API for user accounts (the same one Telegram's own apps use), so it acts as **you**.
+It can read and send in your personal chats; it is not a bot.
+
+1. At [my.telegram.org](https://my.telegram.org), sign in and open *API development tools*.
+   Create an app (any name) and note its `api_id` and `api_hash`.
+2. Stop mac-api if it is running, then log in once:
+
+   ```sh
+   uvx --from git+https://github.com/kostaslamas/Mac_api mac-api --telegram-login
+   ```
+
+   It asks for the `api_id` and `api_hash`, your phone number, the code Telegram sends you, and your 2FA password if you have one.
+3. Start mac-api again. `GET /telegram/status` should show your account.
+
+The login is saved in `~/.config/mac-api/telegram.session` (readable only by you).
+**That file gives full access to your Telegram account**, so keep it private.
+`mac-api --telegram-logout` ends the session on Telegram's side and deletes it.
+The session also shows up under Telegram → Settings → Devices, where you can end it too.
+
+Chats are addressed by id (from `/telegram/chats`), `@username`, a contact's phone number, or `me` for Saved Messages.
+Telegram limits how fast accounts may act, so don't use this for bulk messaging.
+
+## Viber, WhatsApp and other apps
+
+Viber, WhatsApp, Messenger, Signal and most other messengers have no API for personal accounts.
+Viber's REST API is only for business bots: it costs €100 a month and cannot see your own chats.
+Viber Desktop encrypts its database.
+
+These apps still show a notification for each incoming message, and macOS keeps them in the Notification Center database.
+mac-api reads that database:
+
+```sh
+H="Authorization: Bearer $KEY"; API=http://127.0.0.1:8765
+curl -H "$H" "$API/notifications?app=viber"          # newest first; 'app' matches the name or bundle id
+curl -H "$H" "$API/notifications?app=whatsapp&q=dinner"
+curl -H "$H" "$API/notifications/apps"               # which apps have notifications stored
+```
+
+Usually the title is the sender or chat, and the body is the message.
+For AI clients, the tool is `notifications_recent`.
+
+Limits:
+
+- Only incoming messages, only while the desktop app is signed in on the Mac, and only what Notification Center still holds.
+- No replying.
+- If an app hides message previews in its notifications, only the sender is there.
+  Turn previews on in the app's notification settings.
+- Needs macOS 15 (Sequoia) or later and Full Disk Access.
 
 ## Authentication
 
@@ -153,6 +206,9 @@ Responses always include the offset.
 | `--no-auth` | `MAC_API_NO_AUTH=1` | off; only allowed on `127.0.0.1` |
 | | `MAC_API_OSASCRIPT_TIMEOUT` | `60` seconds |
 | | `MAC_API_MESSAGES_DB` | `~/Library/Messages/chat.db` |
+| | `MAC_API_NOTIFICATIONS_DB` | `~/Library/Group Containers/group.com.apple.usernoted/db2/db` |
+| `--telegram-login`, `--telegram-logout` | `MAC_API_TELEGRAM_API_ID`, `MAC_API_TELEGRAM_API_HASH` | read from `~/.config/mac-api/telegram.json`, which `--telegram-login` writes |
+| | `MAC_API_TELEGRAM_SESSION` | `~/.config/mac-api/telegram.session` |
 
 ## Network security
 
@@ -192,6 +248,6 @@ uv run pytest
 uv run mac-api --no-auth   # local testing only
 ```
 
-The tests run anywhere: they use fake Messages/Contacts databases and stub out `osascript`.
+The tests run anywhere: they use fake Messages, Contacts and Notification Center databases, a fake Telegram client, and stub out `osascript`.
 The MCP tests start a real server and connect to it with the official MCP client.
 They also syntax-check every JXA script with Node.js when it is installed.

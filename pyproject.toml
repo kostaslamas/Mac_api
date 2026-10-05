@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn>=0.29",
     "python-dateutil>=2.8",
     "mcp>=2.3,<3",
+    "telethon>=1.36,<2",
 ]
 
 [project.scripts]

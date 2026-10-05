@@ -47,6 +47,9 @@ def diagnostics(
         with request.app.state.messages.connect() as conn:
             conn.execute("SELECT 1 FROM message LIMIT 1").fetchall()
 
+    def read_notifications() -> None:
+        request.app.state.notifications.apps()
+
     def read_contacts() -> None:
         request.app.state.contacts.refresh()
         request.app.state.contacts.all()
@@ -62,7 +65,16 @@ def diagnostics(
             cmd: shutil.which(cmd) is not None
             for cmd in ("osascript", "shortcuts", "screencapture", "say", "pbcopy", "pmset")
         },
-        "full_disk_access": {"messages": _check(read_messages), "contacts": _check(read_contacts)},
+        "full_disk_access": {
+            "messages": _check(read_messages),
+            "contacts": _check(read_contacts),
+            "notifications": _check(read_notifications),
+        },
+        "telegram": {
+            "configured": request.app.state.telegram.configured,
+            "connected": request.app.state.telegram.client is not None,
+            "error": request.app.state.telegram.error,
+        },
     }
     if automation:
         report["automation"] = {app: _check(lambda body=body: run_jxa(body, timeout=30)) for app, body in _AUTOMATION_PROBES.items()}

@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
 
 from . import __version__
-from .config import DEFAULT_KEY_FILE, Settings, load_or_create_api_key
+from .config import (
+    DEFAULT_KEY_FILE,
+    TELEGRAM_CREDENTIALS_FILE,
+    Settings,
+    load_or_create_api_key,
+    write_private_file,
+)
 from .network import LOOPBACK_HOSTS, PRIVATE_NETWORKS, bonjour_name, lan_address, parse_networks
 
 
@@ -28,6 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
     security.add_argument("--rotate-key", action="store_true", help="Replace the stored token with a new one and exit")
     security.add_argument("--read-only", action="store_true", help="Reject everything that changes something")
     security.add_argument("--no-auth", action="store_true", help="Do not require a token (only allowed on 127.0.0.1)")
+
+    telegram = parser.add_argument_group("telegram")
+    telegram.add_argument("--telegram-login", action="store_true", help="Log in to your Telegram account and exit")
+    telegram.add_argument("--telegram-logout", action="store_true", help="End the Telegram session and exit")
 
     other = parser.add_argument_group("other")
     other.add_argument("--no-mcp", action="store_true", help="Do not serve the MCP endpoint at /mcp")
@@ -61,6 +72,24 @@ def mcp_client_config(url: str, key: str) -> str:
     ])
 
 
+def telegram_login(settings: Settings) -> None:
+    from .services.telegram import login
+
+    if not settings.telegram_configured:
+        print("Get an api_id and api_hash at https://my.telegram.org > API development tools.")
+        api_id = input("api_id: ").strip()
+        api_hash = input("api_hash: ").strip()
+        if not api_id.isdigit() or not api_hash:
+            sys.exit("api_id must be a number and api_hash must not be empty.")
+        settings.telegram_api_id, settings.telegram_api_hash = int(api_id), api_hash
+        write_private_file(TELEGRAM_CREDENTIALS_FILE, json.dumps({"api_id": int(api_id), "api_hash": api_hash}))
+    print("Telegram will now ask for your phone number (international format), then the code it sends you.")
+    name = asyncio.run(login(settings))
+    os.chmod(settings.telegram_session, 0o600)
+    print(f"\nLogged in to Telegram as {name}. The session is in {settings.telegram_session};")
+    print("anyone with that file can use your account. Restart mac-api to use Telegram.")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -87,6 +116,17 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--no-auth is only allowed when listening on 127.0.0.1")
     if bool(args.ssl_certfile) != bool(args.ssl_keyfile):
         parser.error("--ssl-certfile and --ssl-keyfile go together")
+
+    if args.telegram_login:
+        telegram_login(settings)
+        return
+    if args.telegram_logout:
+        from .services.telegram import logout
+
+        if settings.telegram_configured and settings.telegram_session.exists():
+            asyncio.run(logout(settings))
+        print("Logged out of Telegram.")
+        return
 
     if args.rotate_key:
         key, _ = load_or_create_api_key(rotate=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from mac_api.app import create_app
 from mac_api.config import Settings
 from mac_api.services.messages import datetime_to_apple_time
 
-API_KEY = "test-key"
+from .helpers import API_KEY, serve
 
 
 def make_attributed_body(text: str) -> bytes:
@@ -196,6 +197,7 @@ def settings(tmp_path: Path, messages_dir: Path, addressbook_dir: Path) -> Setti
         messages_db=messages_dir / "chat.db",
         messages_attachments_dir=messages_dir / "Attachments",
         addressbook_dir=addressbook_dir,
+        notifications_db=tmp_path / "usernoted" / "db",
     )
 
 
@@ -224,3 +226,9 @@ def fake_jxa(monkeypatch):
     for module in ("reminders", "notes", "calendar", "system"):
         monkeypatch.setattr(f"mac_api.services.{module}.run_jxa", fake)
     return fake
+
+
+@pytest.fixture
+def base_url(settings: Settings) -> Iterator[str]:
+    """The app served on a real port, for tests that connect like an MCP client."""
+    yield from serve(settings)

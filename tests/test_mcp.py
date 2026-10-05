@@ -1,69 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import json
-import socket
-import threading
-import time
-from collections.abc import Iterator
 
 import httpx
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
-from mcp import Client
-from mcp.client.streamable_http import streamable_http_client
-from mcp.shared._httpx_utils import create_mcp_http_client
 
 from mac_api import cli
 from mac_api.app import create_app
-from mac_api.config import Settings
 from mac_api.network import PRIVATE_NETWORKS
 
-from .conftest import API_KEY
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def serve(settings: Settings) -> Iterator[str]:
-    port = _free_port()
-    server = uvicorn.Server(uvicorn.Config(create_app(settings), host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        if time.monotonic() > deadline:
-            raise RuntimeError("server did not start")
-        time.sleep(0.05)
-    yield f"http://127.0.0.1:{port}"
-    server.should_exit = True
-    thread.join(timeout=10)
-
-
-@pytest.fixture
-def base_url(settings: Settings) -> Iterator[str]:
-    yield from serve(settings)
-
-
-def call_tools(url: str, calls: list[tuple[str, dict]], token: str = API_KEY) -> tuple[list[str], list]:
-    """Connect like a real MCP client; return the tool names and the result of each call."""
-
-    async def run() -> tuple[list[str], list]:
-        http = create_mcp_http_client(headers={"Authorization": f"Bearer {token}"})
-        async with Client(streamable_http_client(f"{url}/mcp", http_client=http)) as client:
-            tools = [tool.name for tool in (await client.list_tools()).tools]
-            results = [await client.call_tool(name, arguments) for name, arguments in calls]
-        return tools, results
-
-    return asyncio.run(run())
-
-
-def text(result) -> str:
-    return "".join(part.text for part in result.content if part.type == "text")
+from .helpers import API_KEY, call_tools, serve, text
 
 
 def test_mcp_requires_the_token(base_url):
@@ -87,7 +35,7 @@ def test_mcp_tools_end_to_end(base_url, messages_db, fake_jxa):
             ("messages_read", {"chat_id": messages_db["chat1"], "limit": 2}),
         ],
     )
-    assert len(tools) == 34
+    assert len(tools) == 36
     assert {"messages_send", "reminders_delete", "mac_screenshot"} <= set(tools)
 
     assert json.loads(text(contacts))[0]["name"] == "Κώστας Λάμπρου"

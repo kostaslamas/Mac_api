@@ -12,14 +12,27 @@ from .config import Settings
 from .errors import MacAPIError, mac_api_error_handler
 from .mcp_server import build_mcp_server
 from .network import AllowedNetworksMiddleware, parse_networks
-from .routers import calendar, contacts, diagnostics, messages, notes, reminders, shortcuts, system
+from .routers import (
+    calendar,
+    contacts,
+    diagnostics,
+    messages,
+    notes,
+    notifications,
+    reminders,
+    shortcuts,
+    system,
+    telegram,
+)
 from .services.contacts import ContactsIndex
 from .services.messages import MessagesStore
+from .services.notifications import NotificationsStore
+from .services.telegram import TelegramService
 
 DESCRIPTION = """
-Control and read your Mac over HTTP: Reminders, iMessage/SMS, Notes, Calendar,
-Contacts, Shortcuts and system functions. AI assistants can use the same
-services as MCP tools at `/mcp`.
+Control and read your Mac over HTTP: Reminders, iMessage/SMS, Telegram, Notes,
+Calendar, Contacts, Shortcuts, notifications (incoming Viber/WhatsApp/... messages)
+and system functions. AI assistants can use the same services as MCP tools at `/mcp`.
 
 Authenticate every request with `Authorization: Bearer <key>` or `X-API-Key: <key>`.
 Run `GET /diagnostics` first to see which macOS permissions are still missing.
@@ -35,7 +48,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     contacts_index = ContactsIndex(settings.addressbook_dir)
     messages_store = MessagesStore(settings.messages_db, settings.messages_attachments_dir, contacts_index)
-    mcp_server = build_mcp_server(settings, messages_store, contacts_index) if settings.mcp_enabled else None
+    notifications_store = NotificationsStore(settings.notifications_db)
+    telegram_service = TelegramService(settings)
+    mcp_server = None
+    if settings.mcp_enabled:
+        mcp_server = build_mcp_server(
+            settings,
+            messages=messages_store,
+            contacts=contacts_index,
+            notifications=notifications_store,
+            telegram=telegram_service,
+        )
     mcp_app = None
     if mcp_server is not None:
         mcp_app = mcp_server.streamable_http_app(
@@ -49,16 +72,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        if mcp_server is None:
-            yield
-            return
-        async with mcp_server.session_manager.run():
-            yield
+        await telegram_service.start()
+        try:
+            if mcp_server is None:
+                yield
+            else:
+                async with mcp_server.session_manager.run():
+                    yield
+        finally:
+            await telegram_service.stop()
 
     app = FastAPI(title="Mac API", version=__version__, description=DESCRIPTION, lifespan=lifespan)
     app.state.settings = settings
     app.state.contacts = contacts_index
     app.state.messages = messages_store
+    app.state.notifications = notifications_store
+    app.state.telegram = telegram_service
     app.add_exception_handler(MacAPIError, mac_api_error_handler)
     if networks:
         app.add_middleware(AllowedNetworksMiddleware, networks=networks)
@@ -68,7 +97,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok", "version": __version__}
 
     protected = [Depends(require_api_key)]
-    for module in (diagnostics, reminders, messages, contacts, notes, calendar, shortcuts, system):
+    routers = (diagnostics, reminders, messages, contacts, notes, calendar, notifications, telegram, shortcuts, system)
+    for module in routers:
         app.include_router(module.router, dependencies=protected)
     if mcp_app is not None:
         app.add_route("/mcp", RequireAPIKey(mcp_app, settings), include_in_schema=False)

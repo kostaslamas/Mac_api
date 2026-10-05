@@ -7,9 +7,11 @@ Tools that change something are not registered at all in read-only mode.
 # No `from __future__ import annotations`: the MCP SDK builds each tool's input
 # schema from its signature, and the tools are closures.
 
+import contextlib
 import functools
+import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -28,10 +30,13 @@ from .services import shortcuts as shortcuts_service
 from .services import system as system_service
 from .services.contacts import ContactsIndex
 from .services.messages import MessagesStore, SendMessageRequest
+from .services.notifications import NotificationsStore
+from .services.telegram import TelegramSend, TelegramService
 
 INSTRUCTIONS = """\
-Tools that act on the user's own Mac: Reminders, iMessage/SMS, Contacts, Notes, Calendar, \
-Shortcuts and system functions.
+Tools that act on the user's own Mac: Reminders, iMessage/SMS, Telegram, Contacts, Notes, Calendar, \
+Shortcuts, notifications and system functions. Incoming messages from apps without their own \
+tools (Viber, WhatsApp, Messenger, ...) can be read with notifications_recent.
 
 - Datetimes without a timezone are the Mac's local time; results include the UTC offset.
 - Messages and contacts are private. Only bring up what the user asked about.
@@ -55,7 +60,25 @@ def _to_text(value: Any) -> str:
     return json.dumps(_jsonable(value), ensure_ascii=False, default=str)
 
 
-def build_mcp_server(settings: Settings, messages: MessagesStore, contacts: ContactsIndex) -> MCPServer:
+@contextlib.contextmanager
+def _tool_errors() -> Iterator[None]:
+    """Turn our errors into ToolErrors: the SDK hides the message of any other exception."""
+    try:
+        yield
+    except MacAPIError as exc:
+        raise ToolError(f"{exc.detail} Hint: {exc.hint}" if exc.hint else exc.detail) from exc
+    except ValidationError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def build_mcp_server(
+    settings: Settings,
+    *,
+    messages: MessagesStore,
+    contacts: ContactsIndex,
+    notifications: NotificationsStore,
+    telegram: TelegramService,
+) -> MCPServer:
     server = MCPServer(name="mac-api", title="Mac", version=__version__, instructions=INSTRUCTIONS)
 
     def tool(*, writes: bool = False, destructive: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -63,15 +86,23 @@ def build_mcp_server(settings: Settings, messages: MessagesStore, contacts: Cont
             if writes and settings.read_only:
                 return fn
 
-            @functools.wraps(fn)
-            def wrapper(*args: Any, **kwargs: Any) -> Any:
-                try:
-                    result = fn(*args, **kwargs)
-                except MacAPIError as exc:
-                    raise ToolError(f"{exc.detail} Hint: {exc.hint}" if exc.hint else exc.detail) from exc
-                except ValidationError as exc:
-                    raise ToolError(str(exc)) from exc
+            def finish(result: Any) -> Any:
                 return result if isinstance(result, (str, Image)) else _to_text(result)
+
+            # Sync tools run in a worker thread; async ones (Telegram) on the server's event loop.
+            if inspect.iscoroutinefunction(fn):
+
+                @functools.wraps(fn)
+                async def wrapper(*args: Any, **kwargs: Any) -> Any:
+                    with _tool_errors():
+                        return finish(await fn(*args, **kwargs))
+
+            else:
+
+                @functools.wraps(fn)
+                def wrapper(*args: Any, **kwargs: Any) -> Any:
+                    with _tool_errors():
+                        return finish(fn(*args, **kwargs))
 
             annotations = ToolAnnotations(
                 read_only_hint=not writes,
@@ -203,6 +234,71 @@ def build_mcp_server(settings: Settings, messages: MessagesStore, contacts: Cont
     ) -> list[Any]:
         """Search the user's contacts."""
         return contacts.search(query)[:limit]
+
+    # -- Notifications (Viber, WhatsApp, Messenger, ...) ----------------------------------
+
+    @tool()
+    def notifications_recent(
+        app: Annotated[str | None, Field(description="Part of the app name, e.g. 'viber', 'whatsapp', 'messenger'")] = None,
+        query: Annotated[str | None, Field(description="Text to look for in the title or body")] = None,
+        since: datetime | None = None,
+        limit: Annotated[int, Field(ge=1, le=200)] = 30,
+    ) -> list[Any]:
+        """Notifications shown on the Mac, newest first. This is how to read incoming messages
+        from apps that have no tools of their own here (Viber, WhatsApp, Messenger, Signal,
+        Slack, ...): usually the title is the sender or chat and the body is the message.
+        Covers only what Notification Center still holds; there is no way to reply."""
+        return notifications.list(app=app, since=since, query=query, limit=limit)
+
+    @tool()
+    def notifications_apps() -> list[Any]:
+        """Apps that have notifications stored, with counts and the latest time."""
+        return notifications.apps()
+
+    # -- Telegram -------------------------------------------------------------------------
+
+    if telegram.configured:
+
+        @tool()
+        async def telegram_chats(
+            limit: Annotated[int, Field(ge=1, le=100)] = 20, unread_only: bool = False
+        ) -> list[Any]:
+            """Telegram chats, most recent first, with unread counts and the last message.
+            Pass a chat's `id` to telegram_read."""
+            return await telegram.chats(limit, unread_only)
+
+        @tool()
+        async def telegram_read(
+            chat: Annotated[str, Field(description="Chat id, @username, a contact's phone number, or 'me'")],
+            limit: Annotated[int, Field(ge=1, le=200)] = 30,
+            before_id: Annotated[int | None, Field(description="To read further back: the oldest message id you have")] = None,
+        ) -> list[Any]:
+            """The latest messages of a Telegram chat, oldest first."""
+            return await telegram.messages(chat, limit, before_id)
+
+        @tool()
+        async def telegram_search(
+            query: str,
+            chat: Annotated[str | None, Field(description="Only this chat; all chats by default")] = None,
+            limit: Annotated[int, Field(ge=1, le=100)] = 30,
+        ) -> list[Any]:
+            """Search Telegram messages, newest first."""
+            return await telegram.search(query, chat, limit)
+
+        @tool(writes=True)
+        async def telegram_send(
+            to: Annotated[str, Field(description="Chat id, @username, a contact's phone number, or 'me'")],
+            text: str,
+            reply_to: Annotated[int | None, Field(description="Id of the message to reply to")] = None,
+        ) -> Any:
+            """Send a Telegram message as the user. Only send what the user explicitly asked to send."""
+            return await telegram.send(TelegramSend(to=to, text=text, reply_to=reply_to))
+
+        @tool(writes=True)
+        async def telegram_mark_read(chat: str) -> str:
+            """Mark a Telegram chat as read."""
+            await telegram.mark_read(chat)
+            return "Marked as read."
 
     # -- Notes ------------------------------------------------------------------------
 
